@@ -1,0 +1,16 @@
+  # Systeme / editeurs
+  .DS_Store
+  Thumbs.db
+  *.swp
+  *~
+  .vscode/
+  .idea/
+
+  # Ne jamais versionner de secrets
+  *.key
+  *.pem
+  *.kdbx
+  *credentials*
+  *password*
+  *.hash
+
