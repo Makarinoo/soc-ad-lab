@@ -1,13 +1,7 @@
-<!--
-  Regles de detection personnalisees - lab SOC / Active Directory
-  Fichier a deposer dans /var/ossec/etc/rules/ sur le serveur Wazuh
-  (proprietaire wazuh:wazuh, droits 660), puis : systemctl restart wazuh-manager
--->
+
+
 <group name="windows,active_directory,">
 
-  <!-- Kerberoasting : ticket de service demande en RC4.
-       Les comptes machine et krbtgt sont exclus : ils demandent legitimement
-       des tickets, parfois en RC4, et generaient du bruit en continu. -->
   <rule id="100100" level="12">
     <if_sid>60103</if_sid>
     <field name="win.system.eventID">^4769$</field>
@@ -19,7 +13,7 @@
     </mitre>
   </rule>
 
-  <!-- AS-REP Roasting : TGT demande sans pre-authentification -->
+ 
   <rule id="100110" level="12">
     <if_sid>60103</if_sid>
     <field name="win.system.eventID">^4768$</field>
@@ -30,10 +24,7 @@
     </mitre>
   </rule>
 
-  <!-- DCSync : replication des secrets.
-       1131f6aa = DS-Replication-Get-Changes (aussi utilise par la replication legitime)
-       1131f6ad = DS-Replication-Get-Changes-All (le droit qui donne acces aux secrets)
-       Les comptes machine sont exclus, sinon chaque replication entre DC alerte. -->
+
   <rule id="100120" level="14">
     <if_sid>60103</if_sid>
     <field name="win.system.eventID">^4662$</field>
@@ -45,8 +36,7 @@
     </mitre>
   </rule>
 
-  <!-- Enrichissement de la regle native 92057 (PowerShell encode en base64) :
-       niveau releve, mapping MITRE et contexte directement dans l'alerte. -->
+
   <rule id="100130" level="14">
     <if_sid>92057</if_sid>
     <description>PowerShell obfusque : base64 execute par $(win.eventdata.user) sur $(win.eventdata.currentDirectory) - parent $(win.eventdata.parentImage)</description>
