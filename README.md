@@ -5,6 +5,7 @@ Un domaine Windows volontairement vulnérable, isolé derrière un pare-feu, sur
 puis attaqué, et enfin détecté par des règles écrites pour l'occasion.
 
 > **Réalisé par :** Aymane el hasnaoui — étudiant Cyber 2A, EPITA — septembre 2026.
+> **Dépôt :** https://github.com/Makarinoo/soc-ad-lab
 
 ![Tableau de bord Wazuh](captures/45-wazuh-ligne-de-base-avant-attaque.png)
 
@@ -171,6 +172,13 @@ Un VPN maillé **Tailscale** est installé sur l'hyperviseur et sur le SIEM. Le 
 joignable depuis n'importe où, **alors qu'aucune route n'existe entre le réseau domestique et le
 réseau du lab**. Seul le tunnel chiffré traverse, et **aucun port n'est ouvert sur la box**.
 
+> **Une nuance à assumer :** ce tunnel crée un chemin qui **contourne OPNsense**. Le SIEM devient
+> joignable sans passer par le pare-feu du lab, donc l'affirmation « tout le trafic passe par
+> OPNsense » vaut pour les échanges *entre machines du lab*, pas pour cet accès d'administration.
+> L'exposition reste limitée — seuls mes propres appareils, authentifiés sur le tailnet, atteignent
+> la VM, et des ACL Tailscale permettent de restreindre encore — mais c'est une entorse à la
+> segmentation, et elle mérite d'être écrite plutôt que passée sous silence.
+
 ---
 
 ## 7. Attaque : Kerberoasting
@@ -214,6 +222,7 @@ chiffrement **RC4 (`0x17`)**, alors que Windows utilise normalement AES (`0x12`)
   <if_sid>60103</if_sid>
   <field name="win.system.eventID">^4769$</field>
   <field name="win.eventdata.ticketEncryptionType">^0x17$</field>
+  <field name="win.eventdata.serviceName" negate="yes" type="pcre2">(\$$|^krbtgt$)</field>
   <description>Kerberoasting possible : ticket Kerberos RC4 demande pour
                $(win.eventdata.serviceName) depuis $(win.eventdata.ipAddress)</description>
   <mitre>
@@ -221,6 +230,10 @@ chiffrement **RC4 (`0x17`)**, alors que Windows utilise normalement AES (`0x12`)
   </mitre>
 </rule>
 ```
+
+La dernière condition écarte les **comptes machine** (`serviceName` finissant par `$`) et **`krbtgt`** :
+tous deux demandent légitimement des tickets, parfois en RC4, et sans cette exclusion la règle
+produirait du bruit en continu.
 
 ![Règle de détection](captures/55-wazuh-regle-100100-fichier.png)
 
@@ -237,7 +250,7 @@ Trois détections maison, mappées MITRE ATT&CK :
 |---|---|---|
 | `100100` | Ticket de service Kerberos demandé en RC4 | **T1558.003** |
 | `100110` | TGT demandé sans pré-authentification | **T1558.004** |
-| `100120` | Demande de réplication des secrets du domaine | **T1003.006** |
+| `100120` | Réplication des secrets demandée par un compte **non-machine** | **T1003.006** |
 
 ### Pourquoi cette règle n'a pas marché du premier coup
 
@@ -291,8 +304,26 @@ conserver un accès administrateur au domaine même après un changement de mots
 domaine. Le mot de passe visible est celui du lab, volontairement faible et documenté comme tel.)*
 
 Six événements **4662** sont remontés, portant le GUID **`1131f6aa-9c07-11d1-f79f-00c04fc2dcd2`** —
-le droit **DS-Replication-Get-Changes**. Un compte qui l'invoque sans être un contrôleur de domaine,
-c'est une alerte de niveau 14.
+le droit **DS-Replication-Get-Changes**.
+
+⚠️ **Nuance importante :** ce droit seul ne signe pas un DCSync. Il est aussi utilisé par la
+réplication légitime entre contrôleurs. Le droit réellement discriminant est
+**`1131f6ad-9c07-11d1-f79f-00c04fc2dcd2`** — *DS-Replication-Get-Changes-All*, celui qui donne accès
+aux **secrets**. La règle retient donc les deux et, surtout, **exclut les comptes machine** : sans
+cette exclusion, chaque réplication entre DC déclencherait l'alerte.
+
+```xml
+<rule id="100120" level="14">
+  <if_sid>60103</if_sid>
+  <field name="win.system.eventID">^4662$</field>
+  <field name="win.eventdata.properties" type="pcre2">1131f6a[ad]-9c07-11d1-f79f-00c04fc2dcd2</field>
+  <field name="win.eventdata.subjectUserName" negate="yes" type="pcre2">\$$</field>
+  <description>DCSync possible : replication des secrets demandee par $(win.eventdata.subjectUserName)</description>
+  <mitre>
+    <id>T1003.006</id>
+  </mitre>
+</rule>
+```
 
 ![Alerte DCSync](captures/63-wazuh-alerte-dcsync.png)
 
@@ -413,8 +444,12 @@ n'a plus à ouvrir l'événement pour décider.
 |---|---|---|---|
 | `100100` | Ticket de service Kerberos demandé en RC4 | 12 | T1558.003 |
 | `100110` | TGT demandé sans pré-authentification | 12 | T1558.004 |
-| `100120` | Demande de réplication des secrets du domaine | 14 | T1003.006 |
+| `100120` | Réplication des secrets demandée par un compte non-machine | 14 | T1003.006 |
 | `100130` | PowerShell encodé en base64 *(enrichissement de `92057`)* | 14 | T1027 · T1059.001 |
+
+Les quatre règles sont versionnées ici : **[`rules/local_rules.xml`](rules/local_rules.xml)** — à
+déposer dans `/var/ossec/etc/rules/` (propriétaire `wazuh:wazuh`, droits `660`), puis
+`systemctl restart wazuh-manager`.
 
 ---
 
@@ -428,16 +463,37 @@ donc été corrigées, puis **les trois attaques rejouées à l'identique**.
 | Compte | Correctif appliqué | Pourquoi |
 |---|---|---|
 | `svc_sql` | Mot de passe de 24 caractères aléatoires **et `KerberosEncryptionType AES128,AES256`** | Le compte refuse désormais le RC4, et le mot de passe sort du domaine des attaques par dictionnaire |
-| `jdurand` | `DoesNotRequirePreAuth` remis à `False` | La pré-authentification Kerberos redevient obligatoire |
+| `jdurand` | `DoesNotRequirePreAuth` remis à `False` **et mot de passe réinitialisé** | Son empreinte AS-REP a été cassée : rétablir la pré-authentification ne protège pas un secret déjà connu |
 | `sbernard` | Description nettoyée **et mot de passe réinitialisé** | Nettoyer le champ ne suffit pas : le secret a fuité, il est compromis |
-| `pmoreau` | Retiré des « Admins du domaine » | Un compte de support n'a aucune raison d'être administrateur |
-| `krbtgt` | Clé régénérée sur 64 caractères | Le DCSync avait exfiltré son empreinte : sans ce reset, les tickets d'or restaient valides |
+| `pmoreau` | Retiré des « Admins du domaine », **mot de passe réinitialisé**, `adminCount` remis à `0` et héritage des ACL rétabli | Son mot de passe a servi au DCSync. Et le retrait du groupe ne suffit pas : `adminCount=1` et l'héritage désactivé sont laissés en place par **AdminSDHolder** |
+| `krbtgt` | Mot de passe réinitialisé **deux fois** | Le DCSync avait exfiltré son empreinte, et un seul reset ne suffit pas (voir ci-dessous) |
 
 ![Vérification du durcissement](captures/77-dc01-verification-durcissement.png)
 
-> En production, la clé `krbtgt` se réinitialise **deux fois**, à au moins dix heures d'intervalle,
-> pour purger les tickets encore en circulation. Et pour un compte de service, la vraie réponse reste
-> le **gMSA** — un mot de passe de 120 caractères géré et renouvelé par l'annuaire lui-même.
+> **Pourquoi deux réinitialisations de `krbtgt`, y compris dans un lab :** Active Directory conserve
+> la **clé précédente (N-1)** pour continuer d'accepter les tickets déjà émis. Après un seul reset, un
+> ticket d'or forgé avec l'empreinte volée **reste donc valide**. Il en faut une seconde, une fois la
+> première répliquée — dix heures d'intervalle au minimum en production, le temps d'un cycle de
+> réplication et de l'expiration des tickets en cours.
+>
+> **Et une précision sur la commande :** le mot de passe fourni à `Set-ADAccountPassword` pour
+> `krbtgt` est **ignoré** — le contrôleur en génère un aléatoire lui-même. Parler d'une « clé de
+> 64 caractères » n'avait donc aucun sens, et j'ai corrigé la formulation.
+>
+> Pour un compte de service, enfin, la vraie réponse reste le **gMSA** : un mot de passe de
+> 120 caractères géré et renouvelé par l'annuaire, que personne n'a jamais à connaître.
+
+### Ce que ce lab ne fait pas, et qu'un incident réel imposerait
+
+Mon DCSync n'a extrait qu'un seul compte (`-just-dc-user krbtgt`). **Un DCSync complet aurait livré
+les empreintes NT de tout le domaine** — chaque utilisateur, chaque compte machine, chaque relation
+d'approbation. La remédiation ne serait alors plus une liste de quatre comptes, mais une
+**réinitialisation globale** : tous les utilisateurs, les comptes machine, les approbations, et
+`krbtgt` deux fois.
+
+Je ne l'ai pas fait ici, et c'est un choix assumé de lab. Mais confondre « j'ai corrigé les comptes
+que j'ai attaqués » avec « le domaine est sain » serait l'erreur d'analyse la plus coûteuse après une
+compromission réelle.
 
 ### Les mêmes attaques, rejouées
 
@@ -446,10 +502,16 @@ lieu de `$krb5tgs$23$`. Le 18, c'est AES256.
 
 ![Kerberoasting après durcissement](captures/78-kali-kerberoasting-apres-aes.png)
 
-John répond *« No password hashes loaded »* : son format `krb5tgs` ne traite que le RC4. Au-delà de
-l'outil, c'est le coût qui change — **RC4 repose sur HMAC-MD5, testable des milliards de fois par
-seconde, quand AES256 dérive sa clé via PBKDF2 et 4096 itérations.** Le durcissement ralentit
-l'attaquant de plusieurs ordres de grandeur, avant même de considérer la robustesse du mot de passe.
+John répond *« No password hashes loaded »* : son format `krb5tgs` ne traite que le RC4. **Mais
+l'échec de l'outil ne prouve rien** — hashcat casse très bien ce format, avec le mode **19700**
+(TGS-REP AES256). Le ticket reste attaquable, simplement beaucoup plus cher : **RC4 repose sur
+HMAC-MD5, testable des milliards de fois par seconde, là où AES256 dérive sa clé via PBKDF2 et
+4096 itérations.**
+
+Ce qui protège réellement `svc_sql`, ce n'est donc pas le refus de John ni même le passage en AES :
+c'est son **mot de passe de 24 caractères aléatoires**, hors de portée d'une attaque par dictionnaire
+comme par masque. Le chiffrement ne fait que renchérir chaque essai — encore faut-il qu'il y ait un
+espace de recherche à parcourir.
 
 **AS-REP Roasting** — plus aucun compte ne ressort :
 
@@ -506,7 +568,7 @@ Dans un lab, la valeur est autant dans le dépannage que dans le résultat.
 | 9 | DC01 sans passerelle | La VM du pare-feu était restée éteinte | **Règle du lab : OPNsense démarre toujours en premier** |
 | 10 | Bloc de texte jamais terminé dans le terminal | Retour chariot `\r` hérité de Windows | `sed -i 's/\r$//'` |
 | 11 | `dcdiag` en échec sur DFSREvent | Faux positif post-promotion | Vérification par l'événement 4602 |
-| 12 | Installation de l'agent impossible à distance | Serveur HTTP temporaire **exposant tout le répertoire personnel**, archive de certificats comprise | Serveur coupé, transfert par l'agent invité QEMU |
+| 12 | Installation de l'agent impossible à distance | Serveur HTTP temporaire **exposant tout le répertoire personnel**, archive de certificats Wazuh comprise | Serveur coupé, transfert par l'agent invité QEMU. ⚠️ Les certificats exposés **n'ont pas été régénérés** : hors lab, l'exposition imposerait de relancer `wazuh-certs-tool.sh` et de redéployer les agents |
 | 13 | `msiexec` en erreur 1619 | `Invoke-WebRequest` échoue sous le compte système | Remplacé par `curl.exe` |
 | 14 | Règle de détection sans effet | Règle large masquant la spécifique, puis mauvais parent (`60106` au lieu de `60103`) | Chaînage corrigé, ordre des règles revu |
 
