@@ -4,7 +4,7 @@ Laboratoire personnel de détection d'attaques Active Directory, monté sur un m
 Un domaine Windows volontairement vulnérable, isolé derrière un pare-feu, surveillé par un SIEM —
 puis attaqué, et enfin détecté par des règles écrites pour l'occasion.
 
-> **Réalisé par :** Aymane el hasnaoui — étudiant Cyber 2A, EPITA — septembre 2026.
+> **Réalisé par :** Aymane EL HASNAOUI — étudiant Cyber 2A, EPITA — septembre 2026.
 > **Dépôt :** https://github.com/Makarinoo/soc-ad-lab
 
 ![Tableau de bord Wazuh](captures/45-wazuh-ligne-de-base-avant-attaque.png)
